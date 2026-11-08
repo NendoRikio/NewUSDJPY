@@ -1,0 +1,45 @@
+# Environments and Secret Keys (API keys, passwords, credentials)
+.env
+.env.*
+*.env
+*.key
+*.pem
+*.secret
+secrets.toml
+.streamlit/secrets.toml
+
+# Python cache & compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Operating System files
+.DS_Store
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# IDE / Editor configuration
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Temporary setup scripts
+push_github.bat
+
+# Logs and databases
+*.log
+*.sqlite
+*.sqlite3
