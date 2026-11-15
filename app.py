@@ -8,6 +8,7 @@ from plotly.subplots import make_subplots
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from data_fetcher import fetch_pair_data, PAIR_CONFIG
 from technical import compute_technical_indicators, find_support_resistance
@@ -156,27 +157,20 @@ with st.sidebar:
     
     st.markdown("---")
     refresh_button = st.button("🔄 最新データを取得・再推論", use_container_width=True, type="primary")
-    st.caption(f"最終更新: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    now_jst_init = datetime.now(ZoneInfo('Asia/Tokyo'))
+    st.caption(f"起動/分析時刻: {now_jst_init.strftime('%Y-%m-%d %H:%M:%S JST')}")
     st.info("💡 1時間足ATR・CME FedWatch・Google為替ニュース速報をリアルタイム統合解析中")
 
 
 # 3. Data Ingestion & Brain Computation
-@st.cache_data(ttl=120)  # Cache for 2 minutes to be fast while remaining up to date
-def load_all_data(pair: str, hours: float):
+@st.cache_data(ttl=90)  # Cache raw market fetch for 90 seconds
+def load_raw_market_data(pair: str):
     df, summary = fetch_pair_data(pair=pair, period='1mo', interval='1h')
     df = compute_technical_indicators(df)
     sr_levels = find_support_resistance(df)
     fedwatch = fetch_fedwatch_analysis()
     news_items, news_summary = fetch_latest_fx_news(limit=12)
-    prediction = compute_pips_prediction(
-        df=df,
-        summary=summary,
-        fedwatch=fedwatch,
-        news_summary=news_summary,
-        target_hours=hours,
-        pair=pair
-    )
-    return df, summary, sr_levels, fedwatch, news_items, news_summary, prediction
+    return df, summary, sr_levels, fedwatch, news_items, news_summary
 
 
 if refresh_button:
@@ -184,7 +178,19 @@ if refresh_button:
 
 with st.spinner("最新為替レート、FedWatch金利確率、ニュース速報を取得し、AI頭脳で分析中..."):
     try:
-        df, summary, sr_levels, fedwatch, news_items, news_summary, pred = load_all_data(pair_selection, target_hours)
+        df, summary, sr_levels, fedwatch, news_items, news_summary = load_raw_market_data(pair_selection)
+        
+        # 起動時点（現時点）の日本時間を確実に基準として5〜6時間後をリアルタイム推論
+        now_jst = datetime.now(ZoneInfo('Asia/Tokyo'))
+        pred = compute_pips_prediction(
+            df=df,
+            summary=summary,
+            fedwatch=fedwatch,
+            news_summary=news_summary,
+            target_hours=target_hours,
+            pair=pair_selection,
+            base_time=now_jst
+        )
     except Exception as e:
         st.error(f"データ取得中にエラーが発生しました: {e}")
         st.stop()
@@ -200,7 +206,7 @@ with col_h1:
 
 with col_h2:
     st.metric(
-        label="現在レート",
+        label="現在レート (リアルタイム)",
         value=f"{summary['current_price']:.{summary['decimal_places']}f}",
         delta=f"{summary['change_pips']:+.1f} Pips ({summary['pct_change']:+.2f}%)"
     )
@@ -215,9 +221,9 @@ with col_h3:
 
 with col_h4:
     st.metric(
-        label="市場セッション",
-        value=pred['session_name'].split(' ')[0],
-        delta=f"目標時刻: {pred['target_time_str']}",
+        label=f"🎯 予想時刻 ({target_hours}h後)",
+        value=pred['target_time'].strftime('%H:%M JST'),
+        delta=f"現在: {pred['base_time'].strftime('%H:%M JST')}",
         delta_color="off"
     )
 
@@ -232,9 +238,15 @@ st.markdown(f"""
 <div class="hero-card">
     <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap;">
         <div>
-            <span style="color: #a5b4fc; font-weight: 700; font-size: 1.1rem;">
-                🧠 AI統合頭脳による {target_hours}時間後 ({pred['target_time_str']}) の推論結果
-            </span>
+            <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 6px;">
+                <span style="background: rgba(99, 102, 241, 0.25); border: 1px solid #6366f1; padding: 3px 10px; border-radius: 6px; font-size: 0.85rem; color: #c7d2fe; font-weight: 600;">
+                    ⏱️ 起動/分析時点: {pred['base_time_str']}
+                </span>
+                <span style="color: #818cf8; font-weight: bold;">➡️</span>
+                <span style="background: rgba(16, 185, 129, 0.25); border: 1px solid #10b981; padding: 3px 10px; border-radius: 6px; font-size: 0.85rem; color: #a7f3d0; font-weight: 700;">
+                    🎯 予想時刻: {pred['target_time_str']} ({target_hours}時間後)
+                </span>
+            </div>
             <div class="hero-direction" style="color: {pred['direction_color']};">
                 {pred['direction_arrow']} {pred['direction_label']}
             </div>
@@ -329,18 +341,39 @@ if 'BB_Upper2' in plot_df.columns:
     fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['BB_Upper2'], line=dict(color='rgba(148, 163, 184, 0.4)', width=1, dash='dot'), name='BB +2σ'), row=1, col=1)
     fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['BB_Lower2'], line=dict(color='rgba(148, 163, 184, 0.4)', width=1, dash='dot'), name='BB -2σ'), row=1, col=1)
 
-# Future Prediction Cone (Projection into 5.5 hours future)
-last_time = plot_df.index[-1]
-future_time = last_time + pd.Timedelta(hours=target_hours)
-future_times = [last_time, future_time]
+# Future Prediction Cone (Projection into 5.5 hours future from CURRENT LAUNCH TIME)
+last_candle_time = plot_df.index[-1]
+cone_start_time = pred['base_time'].replace(tzinfo=None)
 
-# Center target line
+# Safety check: if candle time is somehow in the future, align to last candle
+if cone_start_time < last_candle_time:
+    cone_start_time = last_candle_time
+
+cone_end_time = cone_start_time + pd.Timedelta(hours=target_hours)
+future_times = [cone_start_time, cone_end_time]
+
+# Connect last confirmed candle to current real-time price if gap exists
+if cone_start_time > last_candle_time:
+    fig.add_trace(
+        go.Scatter(
+            x=[last_candle_time, cone_start_time],
+            y=[plot_df['Close'].iloc[-1], summary['current_price']],
+            mode='lines+markers',
+            line=dict(color='#38bdf8', width=1.5, dash='dot'),
+            marker=dict(size=[0, 7], color='#38bdf8'),
+            name="リアルタイム現在値"
+        ),
+        row=1, col=1
+    )
+
+# Center target line (from launch time to target time)
 fig.add_trace(
     go.Scatter(
         x=future_times,
         y=[summary['current_price'], pred['target_price']],
         mode='lines+markers',
         line=dict(color=pred['direction_color'], width=3, dash='dash'),
+        marker=dict(size=[6, 9], color=pred['direction_color']),
         name=f"AI予測 ({p_delta:+.1f} Pips)"
     ),
     row=1, col=1
@@ -352,7 +385,7 @@ fig.add_trace(
         x=future_times,
         y=[summary['current_price'], pred['target_price_upper']],
         mode='lines',
-        line=dict(color='rgba(99, 102, 241, 0.5)', width=1, dash='dot'),
+        line=dict(color='rgba(99, 102, 241, 0.6)', width=1, dash='dot'),
         name="想定レンジ上限"
     ),
     row=1, col=1
@@ -364,10 +397,10 @@ fig.add_trace(
         x=future_times,
         y=[summary['current_price'], pred['target_price_lower']],
         mode='lines',
-        line=dict(color='rgba(99, 102, 241, 0.5)', width=1, dash='dot'),
+        line=dict(color='rgba(99, 102, 241, 0.6)', width=1, dash='dot'),
         fill='tonexty',
-        fillcolor='rgba(99, 102, 241, 0.12)',
-        name="5〜6h 予測信頼区間ファン"
+        fillcolor='rgba(99, 102, 241, 0.15)',
+        name=f"{target_hours}h後 予測コーン"
     ),
     row=1, col=1
 )
@@ -389,6 +422,15 @@ fig.update_layout(
     margin=dict(l=40, r=40, t=30, b=30),
     xaxis_rangeslider_visible=False,
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+)
+# Ensure x-axis clearly displays up to future prediction horizon
+fig.update_xaxes(
+    range=[plot_df.index[-50], cone_end_time + pd.Timedelta(hours=1.5)],
+    row=1, col=1
+)
+fig.update_xaxes(
+    range=[plot_df.index[-50], cone_end_time + pd.Timedelta(hours=1.5)],
+    row=2, col=1
 )
 st.plotly_chart(fig, use_container_width=True)
 

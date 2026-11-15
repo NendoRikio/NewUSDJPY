@@ -4,13 +4,14 @@ Combines Technical Analysis, CME FedWatch, News Sentiment, and LLM (Gemini)
 to estimate price direction and Pips movement 5 to 6 hours into the future.
 """
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 import math
 import os
 import pandas as pd
 import numpy as np
 
 
-def analyze_market_hours() -> tuple[str, float]:
+def analyze_market_hours(now_dt: datetime = None) -> tuple[str, float]:
     """
     Evaluates current global FX session and volatility multiplier based on JST.
     Tokyo: 09:00 - 15:00 JST (vol factor: 0.85)
@@ -18,7 +19,9 @@ def analyze_market_hours() -> tuple[str, float]:
     New York: 21:00 - 06:00 JST (vol factor: 1.40)
     Overlap (London & NY): 21:00 - 01:00 JST (vol factor: 1.65)
     """
-    now_hour = datetime.now().hour
+    if now_dt is None:
+        now_dt = datetime.now(ZoneInfo('Asia/Tokyo'))
+    now_hour = now_dt.hour
     if 21 <= now_hour or now_hour < 1:
         return "ロンドン & NY 重複市場 (最大流動性・急変動警戒)", 1.55
     elif 1 <= now_hour < 6:
@@ -39,11 +42,17 @@ def compute_pips_prediction(
     fedwatch: dict,
     news_summary: dict,
     target_hours: float = 5.5,
-    pair: str = 'USD/JPY'
+    pair: str = 'USD/JPY',
+    base_time: datetime = None
 ) -> dict:
     """
     Multi-factor predictive model for 5-6 hours forecast.
     """
+    if base_time is None:
+        base_time = datetime.now(ZoneInfo('Asia/Tokyo'))
+    elif base_time.tzinfo is None:
+        base_time = base_time.replace(tzinfo=ZoneInfo('Asia/Tokyo'))
+
     curr_price = summary['current_price']
     pip_val = summary['pip_value']
     is_usdjpy = (pair == 'USD/JPY')
@@ -53,7 +62,7 @@ def compute_pips_prediction(
     if pd.isna(latest_atr) or latest_atr <= 0:
         latest_atr = curr_price * 0.0015
 
-    session_name, vol_mult = analyze_market_hours()
+    session_name, vol_mult = analyze_market_hours(base_time)
 
     # Scaling ATR by sqrt(target_hours) as standard diffusion
     # Average expected total move range in price units
@@ -214,10 +223,13 @@ def compute_pips_prediction(
 
     reasons.append(f"【市場流動性環境】{session_name}。1時間足ATR({latest_atr:.{summary['decimal_places']}f})基準で{target_hours}時間後の平均想定変動幅は約±{expected_range_pips:.1f} Pips。")
 
-    target_time = datetime.now() + timedelta(hours=target_hours)
+    target_time = base_time + timedelta(hours=target_hours)
 
     return {
         'target_hours': target_hours,
+        'base_time': base_time,
+        'target_time': target_time,
+        'base_time_str': base_time.strftime('%H:%M JST (%m/%d)'),
         'target_time_str': target_time.strftime('%H:%M JST (%m/%d)'),
         'pair': pair,
         'curr_price': curr_price,
@@ -311,9 +323,10 @@ def generate_llm_insight(
     # Built-in Intelligent Macro-Strategist Report Generator
     report_lines = [
         f"### 🎯 【{target_hours}時間後 エグゼクティブ・サマリー】",
+        f"- **分析起点**: {pred['base_time_str']} (現時点) ➡️ **到達目標時刻**: **{pred['target_time_str']}** ({target_hours}時間後)",
         f"- **予測方向**: **{direction}**",
         f"- **推定変動幅**: **{pips:+.1f} Pips** (想定レンジ: **{pred['min_pips_delta']:+.1f} Pips** 〜 **{pred['max_pips_delta']:+.1f} Pips**)",
-        f"- **推定ターゲット価格**: **{pred['target_price']:.{summary['decimal_places']}f}** (到達見込み時刻: **{pred['target_time_str']}**)",
+        f"- **推定ターゲット価格**: **{pred['target_price']:.{summary['decimal_places']}f}** (到達見込み: **{pred['target_time_str']}**)",
         f"- **モデル総合信頼度**: **{pred['confidence_pct']}%**",
         "",
         "### 🏛️ 【FedWatch & 金融政策ファンダメンタルズ分析】",

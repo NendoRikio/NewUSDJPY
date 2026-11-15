@@ -3,6 +3,7 @@ Forex market data fetcher module using yfinance.
 Supports USD/JPY and JPY/USD pairs.
 """
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 import pandas as pd
 import yfinance as yf
 
@@ -53,25 +54,39 @@ def fetch_pair_data(pair: str = 'USD/JPY', period: str = '1mo', interval: str = 
     if df.empty:
         raise ValueError(f"Could not retrieve data for {ticker_sym}")
 
-    # Remove timezone issues for plotting
+    # Remove timezone issues for plotting: convert to Asia/Tokyo and make tz-naive
     if df.index.tz is not None:
-        df.index = df.index.tz_convert('Asia/Tokyo')
+        df.index = df.index.tz_convert('Asia/Tokyo').tz_localize(None)
 
     latest_close = df['Close'].iloc[-1]
+    
+    # Try getting real-time fast_info price
+    realtime_price = latest_close
+    try:
+        fast_price = getattr(ticker.fast_info, 'last_price', None)
+        if fast_price is not None and fast_price > 0:
+            if pair == 'JPY/USD':
+                realtime_price = 1.0 / fast_price if ticker_sym == 'USDJPY=X' else fast_price
+            else:
+                realtime_price = fast_price
+    except Exception:
+        pass
+
     prev_close = df['Close'].iloc[-2] if len(df) > 1 else latest_close
     open_today = df['Open'].iloc[-24] if len(df) >= 24 else df['Open'].iloc[0]
 
-    change_val = latest_close - prev_close
+    change_val = realtime_price - prev_close
     change_pips = change_val / cfg['pip_value']
     pct_change = (change_val / prev_close) * 100 if prev_close != 0 else 0
 
-    high_24h = df['High'].iloc[-24:].max() if len(df) >= 24 else df['High'].max()
-    low_24h = df['Low'].iloc[-24:].min() if len(df) >= 24 else df['Low'].min()
+    high_24h = max(df['High'].iloc[-24:].max() if len(df) >= 24 else df['High'].max(), realtime_price)
+    low_24h = min(df['Low'].iloc[-24:].min() if len(df) >= 24 else df['Low'].min(), realtime_price)
 
     summary = {
         'pair': pair,
         'ticker': ticker_sym,
-        'current_price': latest_close,
+        'current_price': realtime_price,
+        'latest_candle_close': latest_close,
         'prev_close': prev_close,
         'change_val': change_val,
         'change_pips': round(change_pips, 1),
@@ -80,7 +95,8 @@ def fetch_pair_data(pair: str = 'USD/JPY', period: str = '1mo', interval: str = 
         'low_24h': low_24h,
         'pip_value': cfg['pip_value'],
         'decimal_places': cfg['decimal_places'],
-        'timestamp': df.index[-1].strftime('%Y-%m-%d %H:%M JST'),
+        'last_candle_time': df.index[-1].strftime('%Y-%m-%d %H:%M JST'),
+        'fetch_time_jst': datetime.now(ZoneInfo('Asia/Tokyo')).strftime('%Y-%m-%d %H:%M:%S JST'),
         'total_bars': len(df)
     }
 
