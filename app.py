@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from data_fetcher import fetch_pair_data, PAIR_CONFIG
-from technical import compute_technical_indicators, find_support_resistance
+from technical import compute_technical_indicators, find_support_resistance, get_advanced_technical_summary
 from fedwatch_fetcher import fetch_fedwatch_analysis
 from news_fetcher import fetch_latest_fx_news
 from brain_engine import compute_pips_prediction, generate_llm_insight
@@ -100,7 +100,7 @@ st.markdown("""
         border: 1px solid #f59e0b;
     }
     
-    /* News Item */
+    /* News & Info Cards */
     .news-card {
         background-color: #111827;
         border-left: 4px solid #6366f1;
@@ -117,6 +117,14 @@ st.markdown("""
     }
     .news-title:hover {
         color: #818cf8;
+    }
+
+    .tech-box {
+        background: #111827;
+        border: 1px solid #334155;
+        border-radius: 10px;
+        padding: 16px;
+        margin-bottom: 14px;
     }
 </style>
 """, unsafe_allow_html=True)
@@ -159,7 +167,7 @@ with st.sidebar:
     refresh_button = st.button("🔄 最新データを取得・再推論", use_container_width=True, type="primary")
     now_jst_init = datetime.now(ZoneInfo('Asia/Tokyo'))
     st.caption(f"起動/分析時刻: {now_jst_init.strftime('%Y-%m-%d %H:%M:%S JST')}")
-    st.info("💡 1時間足ATR・CME FedWatch・Google為替ニュース速報をリアルタイム統合解析中")
+    st.info("💡 一目均衡表・ADX/DMI・FedWatch・為替速報をリアルタイム統合解析中")
 
 
 # 3. Data Ingestion & Brain Computation
@@ -176,7 +184,7 @@ def load_raw_market_data(pair: str):
 if refresh_button:
     st.cache_data.clear()
 
-with st.spinner("最新為替レート、FedWatch金利確率、ニュース速報を取得し、AI頭脳で分析中..."):
+with st.spinner("最新為替レート、FedWatch金利確率、高度テクニカル指標を取得し、AI頭脳で分析中..."):
     try:
         df, summary, sr_levels, fedwatch, news_items, news_summary = load_raw_market_data(pair_selection)
         
@@ -277,7 +285,7 @@ st.markdown(f"""
                 {pred['confidence_pct']}%
             </div>
             <div style="font-size: 0.8rem; color: #94a3b8;">
-                テクニカル・Fed・ニュースの一致度
+                高度テクニカル・Fed・ニュースの一致度
             </div>
         </div>
         <div>
@@ -304,17 +312,40 @@ st.markdown(f"""
 
 
 # 6. Interactive Chart Section with 5-6h Prediction Cone
-st.markdown("### 📈 チャート分析 & 5〜6時間後 予測コーン投影")
+st.markdown("### 📈 チャート分析 & 5〜6時間後 予測コーン投影 (土日休場スキップ連動)")
 
-# Filter last 100 bars for clean chart view
+# Filter bars for clean chart view (last 80 bars)
 plot_df = df.iloc[-80:].copy()
 
+# Detect missing bars (weekends and market holidays) to eliminate gaps and connect lines seamlessly
+full_range = pd.date_range(start=plot_df.index[0], end=plot_df.index[-1], freq='1h')
+missing_times = full_range.difference(plot_df.index)
+break_values = missing_times.strftime('%Y-%m-%d %H:%M:%S').tolist()
+rangebreaks_cfg = [dict(values=break_values, dvalue=3600*1000)] if len(break_values) > 0 else []
+
+col_ctrl1, col_ctrl2 = st.columns([2, 1])
+with col_ctrl1:
+    chart_overlays = st.multiselect(
+        "📊 チャート重ね合わせ指標",
+        options=["一目均衡表 (雲・基準線)", "ボリンジャーバンド (±2σ)", "移動平均線 (SMA20/50)"],
+        default=["一目均衡表 (雲・基準線)", "移動平均線 (SMA20/50)"],
+        help="チャート上に表示したいテクニカル指標を選択できます。"
+    )
+with col_ctrl2:
+    sub_indicator = st.radio(
+        "📉 下段オシレーター選択",
+        options=["RSI (14)", "Slow Stochastics", "MACD"],
+        horizontal=True,
+        index=0
+    )
+
+sub_title_2 = f"オシレーター: {sub_indicator}"
 fig = make_subplots(
     rows=2, cols=1,
     shared_xaxes=True,
     vertical_spacing=0.06,
-    row_heights=[0.75, 0.25],
-    subplot_titles=(f"{pair_selection} 1時間足 (ローソク足 + MA + 予測コーン)", "RSI (14期間)")
+    row_heights=[0.74, 0.26],
+    subplot_titles=(f"{pair_selection} 1時間足 (ローソク足 + 連続推移 + 予測コーン)", sub_title_2)
 )
 
 # Candlestick
@@ -332,27 +363,67 @@ fig.add_trace(
     row=1, col=1
 )
 
-# Moving Averages
-if 'SMA20' in plot_df.columns:
-    fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['SMA20'], line=dict(color='#38bdf8', width=1.5), name='SMA 20'), row=1, col=1)
-if 'SMA50' in plot_df.columns:
-    fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['SMA50'], line=dict(color='#f59e0b', width=1.5), name='SMA 50'), row=1, col=1)
-if 'BB_Upper2' in plot_df.columns:
-    fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['BB_Upper2'], line=dict(color='rgba(148, 163, 184, 0.4)', width=1, dash='dot'), name='BB +2σ'), row=1, col=1)
-    fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['BB_Lower2'], line=dict(color='rgba(148, 163, 184, 0.4)', width=1, dash='dot'), name='BB -2σ'), row=1, col=1)
+# Ichimoku Cloud Overlay
+if "一目均衡表 (雲・基準線)" in chart_overlays:
+    if 'Ichimoku_SpanA' in plot_df.columns and 'Ichimoku_SpanB' in plot_df.columns:
+        fig.add_trace(
+            go.Scatter(
+                x=plot_df.index,
+                y=plot_df['Ichimoku_SpanA'],
+                line=dict(color='rgba(16, 185, 129, 0.4)', width=1),
+                name='先行スパンA'
+            ),
+            row=1, col=1
+        )
+        fig.add_trace(
+            go.Scatter(
+                x=plot_df.index,
+                y=plot_df['Ichimoku_SpanB'],
+                line=dict(color='rgba(239, 68, 68, 0.4)', width=1),
+                fill='tonexty',
+                fillcolor='rgba(99, 102, 241, 0.12)',
+                name='一目 雲'
+            ),
+            row=1, col=1
+        )
+    if 'Ichimoku_Kijun' in plot_df.columns:
+        fig.add_trace(
+            go.Scatter(x=plot_df.index, y=plot_df['Ichimoku_Kijun'], line=dict(color='#fb923c', width=1.3), name='一目 基準線'),
+            row=1, col=1
+        )
+    if 'Ichimoku_Tenkan' in plot_df.columns:
+        fig.add_trace(
+            go.Scatter(x=plot_df.index, y=plot_df['Ichimoku_Tenkan'], line=dict(color='#38bdf8', width=1.1, dash='dot'), name='一目 転換線'),
+            row=1, col=1
+        )
+
+# Moving Averages Overlay
+if "移動平均線 (SMA20/50)" in chart_overlays:
+    if 'SMA20' in plot_df.columns:
+        fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['SMA20'], line=dict(color='#38bdf8', width=1.5), name='SMA 20'), row=1, col=1)
+    if 'SMA50' in plot_df.columns:
+        fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['SMA50'], line=dict(color='#f59e0b', width=1.5), name='SMA 50'), row=1, col=1)
+
+# Bollinger Bands Overlay
+if "ボリンジャーバンド (±2σ)" in chart_overlays:
+    if 'BB_Upper2' in plot_df.columns:
+        fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['BB_Upper2'], line=dict(color='rgba(148, 163, 184, 0.45)', width=1, dash='dot'), name='BB +2σ'), row=1, col=1)
+        fig.add_trace(go.Scatter(x=plot_df.index, y=plot_df['BB_Lower2'], line=dict(color='rgba(148, 163, 184, 0.45)', width=1, dash='dot'), name='BB -2σ'), row=1, col=1)
 
 # Future Prediction Cone (Projection into 5.5 hours future from CURRENT LAUNCH TIME)
 last_candle_time = plot_df.index[-1]
 cone_start_time = pred['base_time'].replace(tzinfo=None)
 
-# Safety check: if candle time is somehow in the future, align to last candle
-if cone_start_time < last_candle_time:
+# Safety check: if weekend / closed market (gap > 12 hours from last confirmed bar),
+# anchor prediction cone cleanly to last confirmed candle to avoid weekend gap
+time_since_last_bar = (cone_start_time - last_candle_time).total_seconds() / 3600
+if time_since_last_bar > 12 or cone_start_time < last_candle_time:
     cone_start_time = last_candle_time
 
 cone_end_time = cone_start_time + pd.Timedelta(hours=target_hours)
 future_times = [cone_start_time, cone_end_time]
 
-# Connect last confirmed candle to current real-time price if gap exists
+# Connect last confirmed candle to current real-time price if gap exists during active trading
 if cone_start_time > last_candle_time:
     fig.add_trace(
         go.Scatter(
@@ -405,14 +476,42 @@ fig.add_trace(
     row=1, col=1
 )
 
-# RSI Subplot
-if 'RSI14' in plot_df.columns:
-    fig.add_trace(
-        go.Scatter(x=plot_df.index, y=plot_df['RSI14'], line=dict(color='#c084fc', width=1.5), name='RSI(14)'),
-        row=2, col=1
-    )
-    fig.add_hline(y=70, line=dict(color='rgba(239, 68, 68, 0.6)', dash='dash', width=1), row=2, col=1)
-    fig.add_hline(y=30, line=dict(color='rgba(16, 185, 129, 0.6)', dash='dash', width=1), row=2, col=1)
+# Subplot Indicator based on user selection
+if sub_indicator == "RSI (14)":
+    if 'RSI14' in plot_df.columns:
+        fig.add_trace(
+            go.Scatter(x=plot_df.index, y=plot_df['RSI14'], line=dict(color='#c084fc', width=1.5), name='RSI(14)'),
+            row=2, col=1
+        )
+        fig.add_hline(y=70, line=dict(color='rgba(239, 68, 68, 0.6)', dash='dash', width=1), row=2, col=1)
+        fig.add_hline(y=30, line=dict(color='rgba(16, 185, 129, 0.6)', dash='dash', width=1), row=2, col=1)
+elif sub_indicator == "Slow Stochastics":
+    if 'Stoch_K' in plot_df.columns and 'Stoch_D' in plot_df.columns:
+        fig.add_trace(
+            go.Scatter(x=plot_df.index, y=plot_df['Stoch_K'], line=dict(color='#38bdf8', width=1.5), name='%K (Slow)'),
+            row=2, col=1
+        )
+        fig.add_trace(
+            go.Scatter(x=plot_df.index, y=plot_df['Stoch_D'], line=dict(color='#f59e0b', width=1.5), name='%D (Slow)'),
+            row=2, col=1
+        )
+        fig.add_hline(y=80, line=dict(color='rgba(239, 68, 68, 0.6)', dash='dash', width=1), row=2, col=1)
+        fig.add_hline(y=20, line=dict(color='rgba(16, 185, 129, 0.6)', dash='dash', width=1), row=2, col=1)
+else:  # MACD
+    if 'MACD' in plot_df.columns and 'MACD_Signal' in plot_df.columns:
+        fig.add_trace(
+            go.Scatter(x=plot_df.index, y=plot_df['MACD'], line=dict(color='#38bdf8', width=1.5), name='MACD'),
+            row=2, col=1
+        )
+        fig.add_trace(
+            go.Scatter(x=plot_df.index, y=plot_df['MACD_Signal'], line=dict(color='#f59e0b', width=1.5), name='Signal'),
+            row=2, col=1
+        )
+        colors = ['#26a69a' if val >= 0 else '#ef5350' for val in plot_df['MACD_Hist']]
+        fig.add_trace(
+            go.Bar(x=plot_df.index, y=plot_df['MACD_Hist'], marker_color=colors, name='Hist'),
+            row=2, col=1
+        )
 
 fig.update_layout(
     template='plotly_dark',
@@ -423,25 +522,31 @@ fig.update_layout(
     xaxis_rangeslider_visible=False,
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
 )
-# Ensure x-axis clearly displays up to future prediction horizon
+
+# Apply rangebreaks to completely eliminate weekend gaps and seamlessly connect from last week
 fig.update_xaxes(
+    rangebreaks=rangebreaks_cfg,
     range=[plot_df.index[-50], cone_end_time + pd.Timedelta(hours=1.5)],
     row=1, col=1
 )
 fig.update_xaxes(
+    rangebreaks=rangebreaks_cfg,
     range=[plot_df.index[-50], cone_end_time + pd.Timedelta(hours=1.5)],
     row=2, col=1
 )
+
 st.plotly_chart(fig, use_container_width=True)
 
 
 # 7. Deep Multi-Factor Tabs (Brain, FedWatch, News, Technicals)
-tab_brain, tab_fed, tab_news, tab_tech = st.tabs([
+tab_brain, tab_tech, tab_fed, tab_news = st.tabs([
     "🧠 かしこい頭脳 AI分析レポート",
+    "📐 高度テクニカル分析 & レジーム",
     "🏛️ CME FedWatch 金利観測",
-    "📰 最新為替ニュース & センチメント",
-    "📐 テクニカル指標・支持線/抵抗線"
+    "📰 最新為替ニュース & センチメント"
 ])
+
+tech_diag = pred.get('tech_diag', {})
 
 with tab_brain:
     col_b1, col_b2 = st.columns([1.8, 1.2])
@@ -456,7 +561,7 @@ with tab_brain:
         scores = pred['scores']
         
         score_df = pd.DataFrame([
-            {"ファクター": "テクニカル総合 (MA/RSI/MACD)", "寄与度": scores['technical'], "配分レンジ": "±40 pt"},
+            {"ファクター": "高度テクニカル総合 (一目/ADX/MA/オシレーター)", "寄与度": scores['technical'], "配分レンジ": "±40 pt"},
             {"ファクター": "FedWatch金融政策 (次回FOMC)", "寄与度": scores['fedwatch'], "配分レンジ": "±30 pt"},
             {"ファクター": "ニュースセンチメント (為替速報)", "寄与度": scores['news'], "配分レンジ": "±15 pt"},
             {"ファクター": "直近モメンタム (過去6時間推移)", "寄与度": scores['momentum'], "配分レンジ": "±15 pt"},
@@ -468,6 +573,70 @@ with tab_brain:
         st.markdown("##### 🔍 推論の判断根拠サマリー")
         for reason in pred['reasons']:
             st.markdown(f"- {reason}")
+
+with tab_tech:
+    st.markdown("#### 📐 高度テクニカル精密分析 (トレンド・一目・オシレーター)")
+    
+    # Row 1: Market Regime & Ichimoku Diagnostics
+    col_t1, col_t2 = st.columns(2)
+    
+    with col_t1:
+        st.markdown(f"""
+        <div class="tech-box">
+            <div class="metric-title">🏛️ 相場環境レジーム & ADXトレンド強度</div>
+            <div style="font-size: 1.3rem; font-weight: 700; color: {tech_diag.get('regime_color', '#38bdf8')}; margin-bottom: 6px;">
+                {tech_diag.get('regime_label', '判定中')}
+            </div>
+            <div style="font-size: 0.85rem; color: #cbd5e1; margin-bottom: 8px;">
+                {tech_diag.get('regime_desc', '')}
+            </div>
+            <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; font-size: 0.85rem;">
+                <div>ADX(14): <b>{tech_diag.get('adx', 0):.1f}</b></div>
+                <div>+DI: <b style="color: #10b981;">{tech_diag.get('plus_di', 0):.1f}</b></div>
+                <div>-DI: <b style="color: #ef4444;">{tech_diag.get('minus_di', 0):.1f}</b></div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+    with col_t2:
+        st.markdown(f"""
+        <div class="tech-box">
+            <div class="metric-title">☁️ 一目均衡表 (Ichimoku Kinko Hyo) 診断</div>
+            <div style="font-size: 1.3rem; font-weight: 700; color: {tech_diag.get('ichimoku_color', '#f59e0b')}; margin-bottom: 6px;">
+                {tech_diag.get('ichimoku_pos_label', '判定中')}
+            </div>
+            <div style="font-size: 0.85rem; color: #cbd5e1; margin-bottom: 8px;">
+                シグナル: <b>{tech_diag.get('tk_cross_label', '')}</b>
+            </div>
+            <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; font-size: 0.85rem;">
+                <div>転換線: <b>{tech_diag.get('tenkan', 0):.{summary['decimal_places']}f}</b></div>
+                <div>基準線: <b>{tech_diag.get('kijun', 0):.{summary['decimal_places']}f}</b></div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    # Row 2: Oscillators, Price Action & S/R Levels
+    col_t3, col_t4 = st.columns(2)
+    latest_row = df.iloc[-1]
+    
+    with col_t3:
+        st.markdown("##### ⚡ オシレーター & ボリンジャーバンド状態")
+        st.write(f"- **RSI (14期間)**: **{latest_row.get('RSI14', 50):.1f}** ({'買われすぎ警戒' if latest_row.get('RSI14', 50) > 70 else ('売られすぎ反発期待' if latest_row.get('RSI14', 50) < 30 else '中立ゾーン')})")
+        st.write(f"- **Slow Stochastics (14, 3, 3)**: **{tech_diag.get('stoch_status', '')}**")
+        st.write(f"- **MACD**: **{latest_row.get('MACD', 0):.4f}** (Signal: {latest_row.get('MACD_Signal', 0):.4f} / Hist: {latest_row.get('MACD_Hist', 0):.4f})")
+        st.write(f"- **ボリンジャーバンド**: **{tech_diag.get('bb_state_label', 'バンド内推移')}** (上限 {latest_row.get('BB_Upper2', 0):.{summary['decimal_places']}f} / 下限 {latest_row.get('BB_Lower2', 0):.{summary['decimal_places']}f})")
+        
+    with col_t4:
+        st.markdown("##### 🛡️ プライスアクション & 水準（支持線・抵抗線）")
+        pa = tech_diag.get('price_action', {})
+        st.write(f"- **直近ローソク足プライスアクション**: **{pa.get('pattern', '通常')}** ({'強気' if pa.get('signal')=='BULLISH' else ('弱気' if pa.get('signal')=='BEARISH' else '中立')})")
+        st.write(f"- **上値レジスタンス 1**: **{sr_levels['resistances'][0]:.{summary['decimal_places']}f}**" if sr_levels['resistances'] else "- レジスタンス: なし")
+        if len(sr_levels['resistances']) > 1:
+            st.write(f"- **上値レジスタンス 2**: **{sr_levels['resistances'][1]:.{summary['decimal_places']}f}**")
+        st.write(f"- **下値サポート 1**: **{sr_levels['supports'][0]:.{summary['decimal_places']}f}**" if sr_levels['supports'] else "- サポート: なし")
+        if len(sr_levels['supports']) > 1:
+            st.write(f"- **下値サポート 2**: **{sr_levels['supports'][1]:.{summary['decimal_places']}f}**")
+        st.write(f"- **1時間足 ATR**: **{latest_row.get('ATR14', 0):.{summary['decimal_places']}f}** (約 {latest_row.get('ATR14', 0)/summary['pip_value']:.1f} Pips)")
 
 with tab_fed:
     st.markdown("#### 🏛️ CME FedWatch（次回FOMC 金利予想確率）")
@@ -521,27 +690,6 @@ with tab_news:
             <a href="{item['link']}" target="_blank" class="news-title">{item['title']}</a>
         </div>
         """, unsafe_allow_html=True)
-
-with tab_tech:
-    st.markdown("#### 📐 テクニカル指標・価格水準詳細")
-    
-    col_t1, col_t2 = st.columns(2)
-    with col_t1:
-        st.markdown("##### 🛡️ レジスタンス（上値抵抗線） & サポート（下値支持線）")
-        st.write(f"- 直近上値レジスタンス 1: **{sr_levels['resistances'][0]:.{summary['decimal_places']}f}**" if sr_levels['resistances'] else "- レジスタンス: なし")
-        if len(sr_levels['resistances']) > 1:
-            st.write(f"- 上値レジスタンス 2: **{sr_levels['resistances'][1]:.{summary['decimal_places']}f}**")
-        st.write(f"- 直近下値サポート 1: **{sr_levels['supports'][0]:.{summary['decimal_places']}f}**" if sr_levels['supports'] else "- サポート: なし")
-        if len(sr_levels['supports']) > 1:
-            st.write(f"- 下値サポート 2: **{sr_levels['supports'][1]:.{summary['decimal_places']}f}**")
-            
-    with col_t2:
-        st.markdown("##### 📊 オシレーター & 変動幅指標")
-        latest_row = df.iloc[-1]
-        st.write(f"- **RSI (14期間)**: {latest_row.get('RSI14', 50):.1f}")
-        st.write(f"- **MACD**: {latest_row.get('MACD', 0):.4f} (Signal: {latest_row.get('MACD_Signal', 0):.4f})")
-        st.write(f"- **1時間足 ATR (14期間)**: {latest_row.get('ATR14', 0):.{summary['decimal_places']}f} (約 {latest_row.get('ATR14', 0)/summary['pip_value']:.1f} Pips)")
-        st.write(f"- **ボリンジャーバンド(20, 2σ)**: 上限 {latest_row.get('BB_Upper2', 0):.{summary['decimal_places']}f} / 下限 {latest_row.get('BB_Lower2', 0):.{summary['decimal_places']}f}")
 
 st.markdown("---")
 st.caption("⚠️ 免責事項: 本アプリは統計モデルおよびAIによる推論情報を提供するものであり、将来の利益を保証するものではありません。外国為替証拠金取引(FX)は元本損失リスクが伴うため、投資判断は自己責任で行ってください。")
